@@ -89,6 +89,16 @@ If you run the stdio MCP server alongside the HTTP server, point it at its own
 }
 ```
 
+## Web frontend
+
+`web/` is a TanStack Start site for browsing the catalogue and viewing rows,
+built on the REST API below. See [web/README.md](web/README.md).
+
+```sh
+pnpm dev                    # the hub, on :8787
+cd web && pnpm install && pnpm dev   # the site, on :3000
+```
+
 ## REST API
 
 | Method | Path | |
