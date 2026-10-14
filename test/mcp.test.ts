@@ -19,6 +19,7 @@ describe("MCP over HTTP", () => {
     const tools = await rpc(app, "tools/list");
     expect(tools.result.tools.map((t: { name: string }) => t.name).sort()).toEqual([
       "get_dataset",
+      "list_councils",
       "list_sources",
       "query_resource",
       "run_sparql",

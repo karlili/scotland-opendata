@@ -128,6 +128,8 @@ describe("REST API", () => {
     const spec = await (await app.request("/openapi.json")).json();
     expect(Object.keys(spec.paths).sort()).toEqual([
       "/v1/admin/sync",
+      "/v1/councils",
+      "/v1/councils/{id}",
       "/v1/datasets",
       "/v1/datasets/{id}",
       "/v1/resources",

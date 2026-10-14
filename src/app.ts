@@ -7,6 +7,8 @@ import type { z } from "zod";
 import { BadRequestError, NotFoundError, type Hub } from "./hub.ts";
 import { mountMcp } from "./mcp/http.ts";
 import {
+  CouncilListQuery,
+  CouncilSchema,
   DatasetDetailSchema,
   DatasetListQuery,
   DatasetSchema,
@@ -68,6 +70,33 @@ export function createApp(hub: Hub, opts: { adminToken?: string } = {}) {
       const source = await hub.catalogue.getSource(c.req.param("id"));
       if (!source) throw new NotFoundError(`Unknown source: ${c.req.param("id")}`);
       return c.json(source);
+    },
+  );
+
+  v1.get(
+    "/councils",
+    describeRoute({
+      tags: ["Catalogue"],
+      summary: "List Scotland's 32 councils and their open data",
+      description:
+        "Every council, with where it publishes open data on its own website and which hub sources harvest it. Councils with no portal are included.",
+      responses: { 200: json(CouncilSchema.array(), "All 32 councils") },
+    }),
+    validator("query", CouncilListQuery),
+    async (c) => c.json(await hub.catalogue.listCouncils(c.req.valid("query").provision)),
+  );
+
+  v1.get(
+    "/councils/:id",
+    describeRoute({
+      tags: ["Catalogue"],
+      summary: "Get one council's open data provision",
+      responses: { 200: json(CouncilSchema, "The council"), 404: notFound },
+    }),
+    async (c) => {
+      const council = await hub.catalogue.getCouncil(c.req.param("id"));
+      if (!council) throw new NotFoundError(`Unknown council: ${c.req.param("id")}`);
+      return c.json(council);
     },
   );
 

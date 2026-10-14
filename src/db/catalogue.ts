@@ -1,6 +1,7 @@
 import { DuckDBInstance, LIST, VARCHAR, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import type { CouncilDefinition, CouncilEndpoint, Provision } from "../councils.ts";
 import type { SourceDefinition, SourceKind } from "../sources/registry.ts";
 
 /**
@@ -18,10 +19,27 @@ export interface SourceRow {
   kind: SourceKind;
   base_url: string;
   homepage: string;
+  council_id: string | null;
   last_synced_at: string | null;
   last_sync_error: string | null;
   dataset_count: number;
   resource_count: number;
+}
+
+export interface CouncilRow {
+  id: string;
+  name: string;
+  gss: string;
+  website: string;
+  provision: Provision;
+  open_data_url: string | null;
+  platform: string | null;
+  endpoints: CouncilEndpoint[];
+  notes: string;
+  checked_at: string;
+  /** Hub sources harvested from this council's own portal. */
+  source_ids: string[];
+  dataset_count: number;
 }
 
 export interface DatasetRow {
@@ -114,6 +132,21 @@ CREATE TABLE IF NOT EXISTS resources (
   access_type VARCHAR NOT NULL CHECK (access_type IN ('api', 'csv', 'file')),
   queryable BOOLEAN NOT NULL
 );
+
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS council_id VARCHAR;
+
+CREATE TABLE IF NOT EXISTS councils (
+  id VARCHAR PRIMARY KEY,
+  name VARCHAR NOT NULL,
+  gss VARCHAR NOT NULL,
+  website VARCHAR NOT NULL,
+  provision VARCHAR NOT NULL CHECK (provision IN ('portal', 'landing-page', 'none')),
+  open_data_url VARCHAR,
+  platform VARCHAR,
+  endpoints JSON NOT NULL,
+  notes VARCHAR NOT NULL,
+  checked_at VARCHAR NOT NULL
+);
 `;
 
 export async function openCatalogue(path: string): Promise<Catalogue> {
@@ -163,12 +196,87 @@ export class Catalogue {
 
   async upsertSource(s: SourceDefinition): Promise<void> {
     await this.conn.run(
-      `INSERT INTO sources (id, title, publisher, kind, base_url, homepage)
-       VALUES ($id, $title, $publisher, $kind, $baseUrl, $homepage)
+      `INSERT INTO sources (id, title, publisher, kind, base_url, homepage, council_id)
+       VALUES ($id, $title, $publisher, $kind, $baseUrl, $homepage, $councilId)
        ON CONFLICT (id) DO UPDATE SET title = excluded.title, publisher = excluded.publisher,
-         kind = excluded.kind, base_url = excluded.base_url, homepage = excluded.homepage`,
-      { id: s.id, title: s.title, publisher: s.publisher, kind: s.kind, baseUrl: s.baseUrl, homepage: s.homepage },
+         kind = excluded.kind, base_url = excluded.base_url, homepage = excluded.homepage,
+         council_id = excluded.council_id`,
+      {
+        id: s.id,
+        title: s.title,
+        publisher: s.publisher,
+        kind: s.kind,
+        baseUrl: s.baseUrl,
+        homepage: s.homepage,
+        councilId: s.councilId ?? null,
+      },
     );
+  }
+
+  /** Replaces the council register with the given list. */
+  async replaceCouncils(councils: CouncilDefinition[], checkedAt: string): Promise<void> {
+    await this.conn.run("BEGIN TRANSACTION");
+    try {
+      await this.conn.run("DELETE FROM councils");
+      for (const c of councils) {
+        await this.conn.run(
+          `INSERT INTO councils VALUES ($id, $name, $gss, $website, $provision, $openDataUrl, $platform, $endpoints, $notes, $checkedAt)`,
+          {
+            id: c.id,
+            name: c.name,
+            gss: c.gss,
+            website: c.website,
+            provision: c.provision,
+            openDataUrl: c.openDataUrl,
+            platform: c.platform,
+            endpoints: JSON.stringify(c.endpoints),
+            notes: c.notes,
+            checkedAt,
+          },
+        );
+      }
+      await this.conn.run("COMMIT");
+    } catch (err) {
+      await this.conn.run("ROLLBACK");
+      throw err;
+    }
+  }
+
+  private councilsSql(where = "") {
+    return `WITH src AS (
+        SELECT council_id, list_sort(list(id)) AS source_ids FROM sources
+        WHERE council_id IS NOT NULL GROUP BY council_id
+      ), ds AS (
+        SELECT s.council_id, COUNT(*)::INTEGER AS n FROM datasets d JOIN sources s ON d.source_id = s.id
+        WHERE s.council_id IS NOT NULL GROUP BY s.council_id
+      )
+      SELECT c.id, c.name, c.gss, c.website, c.provision, c.open_data_url, c.platform,
+        c.endpoints::VARCHAR AS endpoints, c.notes, c.checked_at,
+        COALESCE(src.source_ids, []::VARCHAR[]) AS source_ids, COALESCE(ds.n, 0)::INTEGER AS dataset_count
+      FROM councils c LEFT JOIN src ON src.council_id = c.id LEFT JOIN ds ON ds.council_id = c.id
+      ${where} ORDER BY c.name`;
+  }
+
+  private parseCouncil = (row: Omit<CouncilRow, "endpoints"> & { endpoints: string }): CouncilRow => ({
+    ...row,
+    endpoints: JSON.parse(row.endpoints) as CouncilEndpoint[],
+    source_ids: row.source_ids ?? [],
+  });
+
+  async listCouncils(provision?: Provision): Promise<CouncilRow[]> {
+    const rows = await this.all<Omit<CouncilRow, "endpoints"> & { endpoints: string }>(
+      this.councilsSql(provision ? "WHERE c.provision = $provision" : ""),
+      provision ? { provision } : {},
+    );
+    return rows.map(this.parseCouncil);
+  }
+
+  async getCouncil(id: string): Promise<CouncilRow | undefined> {
+    const [row] = await this.all<Omit<CouncilRow, "endpoints"> & { endpoints: string }>(
+      this.councilsSql("WHERE c.id = $id"),
+      { id },
+    );
+    return row && this.parseCouncil(row);
   }
 
   /**

@@ -21,6 +21,20 @@ export function createMcpServer(hub: Hub): McpServer {
   );
 
   server.registerTool(
+    "list_councils",
+    {
+      title: "List councils",
+      description:
+        "List Scotland's 32 councils with how each publishes open data (own portal, landing page, or none), the portal URL and platform, untracked feeds, and the hub source ids to pass to search_datasets. Every council also publishes spatial data on the spatial-hub source.",
+      inputSchema: {
+        provision: z.enum(["portal", "landing-page", "none"]).optional().describe("Only councils with this kind of provision"),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ provision }) => text(await hub.catalogue.listCouncils(provision)),
+  );
+
+  server.registerTool(
     "search_datasets",
     {
       title: "Search datasets",
@@ -28,7 +42,7 @@ export function createMcpServer(hub: Hub): McpServer {
         "Full-text search of the Scottish open data catalogue. By default returns only datasets with API access; set include_csv_only to also see datasets that are CSV downloads only.",
       inputSchema: {
         query: z.string().optional().describe("Words to search for, e.g. 'population estimates council'"),
-        source: z.string().optional().describe("Restrict to one source id, e.g. data-gov-scot"),
+        source: z.string().optional().describe("Restrict to one source id, e.g. data-gov-scot, spatial-hub or a council id such as glasgow-city"),
         include_csv_only: z.boolean().default(false),
         limit: z.number().int().min(1).max(100).default(20),
         offset: z.number().int().min(0).default(0),
