@@ -54,7 +54,7 @@ export function createApp(hub: Hub, opts: { adminToken?: string } = {}) {
       summary: "List upstream portals",
       responses: { 200: json(SourceSchema.array(), "Sources the hub harvests") },
     }),
-    (c) => c.json(hub.catalogue.listSources()),
+    async (c) => c.json(await hub.catalogue.listSources()),
   );
 
   v1.get(
@@ -64,8 +64,8 @@ export function createApp(hub: Hub, opts: { adminToken?: string } = {}) {
       summary: "Get one upstream portal",
       responses: { 200: json(SourceSchema, "The source"), 404: notFound },
     }),
-    (c) => {
-      const source = hub.catalogue.getSource(c.req.param("id"));
+    async (c) => {
+      const source = await hub.catalogue.getSource(c.req.param("id"));
       if (!source) throw new NotFoundError(`Unknown source: ${c.req.param("id")}`);
       return c.json(source);
     },
@@ -93,13 +93,13 @@ export function createApp(hub: Hub, opts: { adminToken?: string } = {}) {
     describeRoute({
       tags: ["Catalogue"],
       summary: "Search datasets",
-      description: "Served from the local SQLite catalogue. By default only datasets with API access are returned.",
+      description: "Served from the local DuckDB catalogue. By default only datasets with API access are returned.",
       responses: { 200: json(page(DatasetSchema), "A page of datasets") },
     }),
     validator("query", DatasetListQuery),
-    (c) => {
+    async (c) => {
       const q = c.req.valid("query");
-      const result = hub.catalogue.searchDatasets({
+      const result = await hub.catalogue.searchDatasets({
         q: q.q,
         source: q.source,
         hasApi: q.has_api === "any" ? undefined : q.has_api === "true",
@@ -117,8 +117,8 @@ export function createApp(hub: Hub, opts: { adminToken?: string } = {}) {
       summary: "Get a dataset with its resources",
       responses: { 200: json(DatasetDetailSchema, "The dataset"), 404: notFound },
     }),
-    (c) => {
-      const dataset = hub.catalogue.getDataset(c.req.param("id"));
+    async (c) => {
+      const dataset = await hub.catalogue.getDataset(c.req.param("id"));
       if (!dataset) throw new NotFoundError(`Unknown dataset: ${c.req.param("id")}`);
       return c.json(dataset);
     },
@@ -133,9 +133,9 @@ export function createApp(hub: Hub, opts: { adminToken?: string } = {}) {
       responses: { 200: json(page(ResourceSchema), "A page of resources") },
     }),
     validator("query", ResourceListQuery),
-    (c) => {
+    async (c) => {
       const q = c.req.valid("query");
-      return c.json({ ...hub.catalogue.listResources(q), limit: q.limit, offset: q.offset });
+      return c.json({ ...(await hub.catalogue.listResources(q)), limit: q.limit, offset: q.offset });
     },
   );
 
@@ -146,8 +146,8 @@ export function createApp(hub: Hub, opts: { adminToken?: string } = {}) {
       summary: "Get one resource",
       responses: { 200: json(ResourceSchema, "The resource"), 404: notFound },
     }),
-    (c) => {
-      const resource = hub.catalogue.getResource(c.req.param("id"));
+    async (c) => {
+      const resource = await hub.catalogue.getResource(c.req.param("id"));
       if (!resource) throw new NotFoundError(`Unknown resource: ${c.req.param("id")}`);
       return c.json(resource);
     },
@@ -214,7 +214,7 @@ export function createApp(hub: Hub, opts: { adminToken?: string } = {}) {
           title: "Scotland Open Data Hub",
           version: "0.1.0",
           description:
-            "One REST API over Scottish public sector open data portals. The catalogue is served from SQLite; row queries are proxied live to the upstream API.",
+            "One REST API over Scottish public sector open data portals. The catalogue is served from DuckDB; row queries are proxied live to the upstream API.",
         },
         servers: [{ url: "/" }],
       },

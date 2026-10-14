@@ -1,7 +1,7 @@
 # Scotland Open Data Hub
 
 One REST API and one MCP server over Scottish public sector open data. The hub
-harvests upstream catalogues into a local SQLite database, so search and
+harvests upstream catalogues into a local DuckDB database, so search and
 lookups are fast, and proxies row-level queries live to the upstream APIs.
 
 ## Sources
@@ -30,7 +30,7 @@ Datasets with no `api` resource are still tracked, but `/v1/datasets` and the
 
 ```sh
 pnpm install
-pnpm sync            # harvest every source into data/catalogue.db (or: pnpm sync data-gov-scot)
+pnpm sync            # harvest every source into data/catalogue.duckdb (or: pnpm sync data-gov-scot)
 pnpm dev             # http://localhost:8787
 ```
 
@@ -38,10 +38,15 @@ pnpm dev             # http://localhost:8787
 - MCP (Streamable HTTP): `/mcp`
 - MCP (stdio, for Claude Desktop and similar): `pnpm mcp`
 
+DuckDB lets only one process open the database file at a time. Run `pnpm sync`
+before starting the server, or re-sync a running server with `POST /v1/admin/sync`.
+If you run the stdio MCP server alongside the HTTP server, point it at its own
+`CATALOGUE_DB` file.
+
 | Env var | Default | |
 | --- | --- | --- |
 | `PORT` | `8787` | |
-| `CATALOGUE_DB` | `data/catalogue.db` | SQLite file |
+| `CATALOGUE_DB` | `data/catalogue.duckdb` | DuckDB file |
 | `ADMIN_TOKEN` | unset | Enables `POST /v1/admin/sync` with `Authorization: Bearer …` |
 | `UPSTREAM_TIMEOUT_MS` | `30000` | |
 
@@ -63,7 +68,7 @@ pnpm dev             # http://localhost:8787
 | Method | Path | |
 | --- | --- | --- |
 | GET | `/v1/sources` | Upstream portals, counts, last sync |
-| GET | `/v1/datasets?q=&source=&has_api=true\|false\|any` | Full-text search (SQLite FTS5) |
+| GET | `/v1/datasets?q=&source=&has_api=true\|false\|any` | Search: every word must match title, description, tags or publisher |
 | GET | `/v1/datasets/{id}` | Dataset with its resources |
 | GET | `/v1/resources?access=api\|csv\|file&format=&dataset=` | Every tracked endpoint and download |
 | GET | `/v1/resources/{id}/rows?limit=&offset=&q=&filters=&sort=` | Live rows from the upstream API |

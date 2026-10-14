@@ -105,7 +105,7 @@ export function fakeFetch(opts: { failCkan?: boolean } = {}) {
 
 export async function syncedHub(opts: { failCkan?: boolean } = {}) {
   const fetcher = fakeFetch(opts);
-  const hub = new Hub(openCatalogue(":memory:"), fetcher.impl, testSources);
+  const hub = await Hub.create(await openCatalogue(":memory:"), fetcher.impl, testSources);
   const reports = await hub.sync();
   return { hub, reports, calls: fetcher.calls, upstream: fetcher.state };
 }

@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import { DuckDBInstance, LIST, VARCHAR, type DuckDBConnection, type DuckDBValue } from "@duckdb/node-api";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { SourceDefinition, SourceKind } from "../sources/registry.ts";
@@ -74,77 +74,55 @@ export interface ResourceInput {
   queryable: boolean;
 }
 
+// No foreign keys: DuckDB's FK checks make the delete-then-reload in
+// replaceSourceContents awkward, and that method is the only writer.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS sources (
-  id TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  publisher TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  base_url TEXT NOT NULL,
-  homepage TEXT NOT NULL,
-  last_synced_at TEXT,
-  last_sync_error TEXT
+  id VARCHAR PRIMARY KEY,
+  title VARCHAR NOT NULL,
+  publisher VARCHAR NOT NULL,
+  kind VARCHAR NOT NULL,
+  base_url VARCHAR NOT NULL,
+  homepage VARCHAR NOT NULL,
+  last_synced_at VARCHAR,
+  last_sync_error VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS datasets (
-  id TEXT PRIMARY KEY,
-  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  title TEXT NOT NULL,
-  description TEXT,
-  publisher TEXT,
-  license TEXT,
-  tags TEXT NOT NULL DEFAULT '[]',
-  modified TEXT,
-  upstream_url TEXT NOT NULL,
-  has_api INTEGER NOT NULL DEFAULT 0,
-  has_csv INTEGER NOT NULL DEFAULT 0
+  id VARCHAR PRIMARY KEY,
+  source_id VARCHAR NOT NULL,
+  name VARCHAR NOT NULL,
+  title VARCHAR NOT NULL,
+  description VARCHAR,
+  publisher VARCHAR,
+  license VARCHAR,
+  tags VARCHAR[] NOT NULL,
+  modified VARCHAR,
+  upstream_url VARCHAR NOT NULL,
+  has_api BOOLEAN NOT NULL,
+  has_csv BOOLEAN NOT NULL
 );
-CREATE INDEX IF NOT EXISTS datasets_source ON datasets(source_id);
-CREATE INDEX IF NOT EXISTS datasets_has_api ON datasets(has_api);
 
 CREATE TABLE IF NOT EXISTS resources (
-  id TEXT PRIMARY KEY,
-  dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
-  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-  upstream_id TEXT NOT NULL,
-  name TEXT,
-  format TEXT,
-  url TEXT,
-  access_type TEXT NOT NULL CHECK (access_type IN ('api', 'csv', 'file')),
-  queryable INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS resources_dataset ON resources(dataset_id);
-CREATE INDEX IF NOT EXISTS resources_access ON resources(access_type);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS datasets_fts USING fts5(
-  dataset_id UNINDEXED, title, description, tags, publisher
+  id VARCHAR PRIMARY KEY,
+  dataset_id VARCHAR NOT NULL,
+  source_id VARCHAR NOT NULL,
+  upstream_id VARCHAR NOT NULL,
+  name VARCHAR,
+  format VARCHAR,
+  url VARCHAR,
+  access_type VARCHAR NOT NULL CHECK (access_type IN ('api', 'csv', 'file')),
+  queryable BOOLEAN NOT NULL
 );
 `;
 
-export function openCatalogue(path: string): Catalogue {
+export async function openCatalogue(path: string): Promise<Catalogue> {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-  const db = new Database(path);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  db.exec(SCHEMA);
-  return new Catalogue(db);
+  const instance = await DuckDBInstance.create(path);
+  const conn = await instance.connect();
+  await conn.run(SCHEMA);
+  return new Catalogue(instance, conn);
 }
-
-type RawDataset = Omit<DatasetRow, "tags" | "has_api" | "has_csv"> & {
-  tags: string;
-  has_api: number;
-  has_csv: number;
-};
-type RawResource = Omit<ResourceRow, "queryable"> & { queryable: number };
-
-const toDataset = (r: RawDataset): DatasetRow => ({
-  ...r,
-  tags: JSON.parse(r.tags) as string[],
-  has_api: r.has_api === 1,
-  has_csv: r.has_csv === 1,
-});
-const toResource = (r: RawResource): ResourceRow => ({ ...r, queryable: r.queryable === 1 });
 
 export interface DatasetQuery {
   q?: string;
@@ -164,177 +142,207 @@ export interface ResourceQuery {
   offset: number;
 }
 
-/** Turns free text into an FTS5 query that matches every word as a prefix. */
-function ftsQuery(q: string): string | null {
-  const terms = q.match(/[\p{L}\p{N}]+/gu);
-  if (!terms) return null;
-  return terms.map((t) => `"${t}"*`).join(" ");
-}
-
 const DATASET_COLUMNS = `
   d.id, d.source_id, d.name, d.title, d.description, d.publisher, d.license, d.tags,
   d.modified, d.upstream_url, d.has_api, d.has_csv,
-  (SELECT COUNT(*) FROM resources r WHERE r.dataset_id = d.id) AS resource_count`;
+  (SELECT COUNT(*) FROM resources r WHERE r.dataset_id = d.id)::INTEGER AS resource_count`;
+
+const opt = (v: string | null | undefined, append: (s: string) => void, appendNull: () => void) =>
+  v == null ? appendNull() : append(v);
 
 export class Catalogue {
-  constructor(readonly db: Database.Database) {}
+  constructor(
+    private readonly instance: DuckDBInstance,
+    private readonly conn: DuckDBConnection,
+  ) {}
 
-  upsertSource(s: SourceDefinition): void {
-    this.db
-      .prepare(
-        `INSERT INTO sources (id, title, publisher, kind, base_url, homepage)
-         VALUES (@id, @title, @publisher, @kind, @baseUrl, @homepage)
-         ON CONFLICT(id) DO UPDATE SET title = excluded.title, publisher = excluded.publisher,
-           kind = excluded.kind, base_url = excluded.base_url, homepage = excluded.homepage`,
-      )
-      .run(s);
+  private async all<T>(sql: string, params: Record<string, DuckDBValue> = {}): Promise<T[]> {
+    const reader = await this.conn.runAndReadAll(sql, params);
+    return reader.getRowObjectsJson() as T[];
   }
 
-  /** Atomically replaces everything held for one source with a fresh harvest. */
-  replaceSourceContents(sourceId: string, datasets: DatasetInput[], syncedAt: string): void {
-    const insertDataset = this.db.prepare(
-      `INSERT INTO datasets (id, source_id, name, title, description, publisher, license, tags,
-         modified, upstream_url, has_api, has_csv)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  async upsertSource(s: SourceDefinition): Promise<void> {
+    await this.conn.run(
+      `INSERT INTO sources (id, title, publisher, kind, base_url, homepage)
+       VALUES ($id, $title, $publisher, $kind, $baseUrl, $homepage)
+       ON CONFLICT (id) DO UPDATE SET title = excluded.title, publisher = excluded.publisher,
+         kind = excluded.kind, base_url = excluded.base_url, homepage = excluded.homepage`,
+      { id: s.id, title: s.title, publisher: s.publisher, kind: s.kind, baseUrl: s.baseUrl, homepage: s.homepage },
     );
-    const insertResource = this.db.prepare(
-      `INSERT OR REPLACE INTO resources (id, dataset_id, source_id, upstream_id, name, format, url,
-         access_type, queryable)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-    const insertFts = this.db.prepare(
-      `INSERT INTO datasets_fts (dataset_id, title, description, tags, publisher) VALUES (?, ?, ?, ?, ?)`,
-    );
+  }
 
-    this.db.transaction(() => {
-      this.db
-        .prepare(`DELETE FROM datasets_fts WHERE dataset_id IN (SELECT id FROM datasets WHERE source_id = ?)`)
-        .run(sourceId);
-      this.db.prepare(`DELETE FROM resources WHERE source_id = ?`).run(sourceId);
-      this.db.prepare(`DELETE FROM datasets WHERE source_id = ?`).run(sourceId);
+  /**
+   * Atomically replaces everything held for one source with a fresh harvest.
+   * Runs on its own connection so readers keep seeing the old catalogue
+   * until the transaction commits.
+   */
+  async replaceSourceContents(sourceId: string, datasets: DatasetInput[], syncedAt: string): Promise<void> {
+    const conn = await this.instance.connect();
+    try {
+      await conn.run("BEGIN TRANSACTION");
+      try {
+        await conn.run(`DELETE FROM resources WHERE source_id = $s`, { s: sourceId });
+        await conn.run(`DELETE FROM datasets WHERE source_id = $s`, { s: sourceId });
 
-      const seen = new Set<string>();
-      for (const d of datasets) {
-        const id = `${sourceId}:${d.name}`;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        const hasApi = d.resources.some((r) => r.accessType === "api");
-        const hasCsv = d.resources.some((r) => r.accessType === "csv");
-        const tags = d.tags ?? [];
-        insertDataset.run(
-          id, sourceId, d.name, d.title, d.description ?? null, d.publisher ?? null,
-          d.license ?? null, JSON.stringify(tags), d.modified ?? null, d.upstreamUrl,
-          hasApi ? 1 : 0, hasCsv ? 1 : 0,
-        );
-        insertFts.run(id, d.title, d.description ?? "", tags.join(" "), d.publisher ?? "");
-        for (const r of d.resources) {
-          insertResource.run(
-            `${sourceId}:${r.upstreamId}`, id, sourceId, r.upstreamId, r.name ?? null,
-            r.format ?? null, r.url ?? null, r.accessType, r.queryable ? 1 : 0,
-          );
+        const ds = await conn.createAppender("datasets");
+        const rs = await conn.createAppender("resources");
+        const seenDatasets = new Set<string>();
+        const seenResources = new Set<string>();
+        for (const d of datasets) {
+          const id = `${sourceId}:${d.name}`;
+          if (seenDatasets.has(id)) continue;
+          seenDatasets.add(id);
+          ds.appendVarchar(id);
+          ds.appendVarchar(sourceId);
+          ds.appendVarchar(d.name);
+          ds.appendVarchar(d.title);
+          opt(d.description, (v) => ds.appendVarchar(v), () => ds.appendNull());
+          opt(d.publisher, (v) => ds.appendVarchar(v), () => ds.appendNull());
+          opt(d.license, (v) => ds.appendVarchar(v), () => ds.appendNull());
+          ds.appendList(d.tags ?? [], LIST(VARCHAR));
+          opt(d.modified, (v) => ds.appendVarchar(v), () => ds.appendNull());
+          ds.appendVarchar(d.upstreamUrl);
+          ds.appendBoolean(d.resources.some((r) => r.accessType === "api"));
+          ds.appendBoolean(d.resources.some((r) => r.accessType === "csv"));
+          ds.endRow();
+
+          for (const r of d.resources) {
+            const rid = `${sourceId}:${r.upstreamId}`;
+            if (seenResources.has(rid)) continue;
+            seenResources.add(rid);
+            rs.appendVarchar(rid);
+            rs.appendVarchar(id);
+            rs.appendVarchar(sourceId);
+            rs.appendVarchar(r.upstreamId);
+            opt(r.name, (v) => rs.appendVarchar(v), () => rs.appendNull());
+            opt(r.format, (v) => rs.appendVarchar(v), () => rs.appendNull());
+            opt(r.url, (v) => rs.appendVarchar(v), () => rs.appendNull());
+            rs.appendVarchar(r.accessType);
+            rs.appendBoolean(r.queryable);
+            rs.endRow();
+          }
         }
+        ds.closeSync();
+        rs.closeSync();
+
+        await conn.run(`UPDATE sources SET last_synced_at = $at, last_sync_error = NULL WHERE id = $s`, {
+          at: syncedAt,
+          s: sourceId,
+        });
+        await conn.run("COMMIT");
+      } catch (err) {
+        await conn.run("ROLLBACK");
+        throw err;
       }
-      this.db
-        .prepare(`UPDATE sources SET last_synced_at = ?, last_sync_error = NULL WHERE id = ?`)
-        .run(syncedAt, sourceId);
-    })();
-  }
-
-  recordSyncError(sourceId: string, error: string): void {
-    this.db.prepare(`UPDATE sources SET last_sync_error = ? WHERE id = ?`).run(error, sourceId);
-  }
-
-  listSources(): SourceRow[] {
-    return this.db
-      .prepare(
-        `SELECT s.*,
-           (SELECT COUNT(*) FROM datasets d WHERE d.source_id = s.id) AS dataset_count,
-           (SELECT COUNT(*) FROM resources r WHERE r.source_id = s.id) AS resource_count
-         FROM sources s ORDER BY s.id`,
-      )
-      .all() as SourceRow[];
-  }
-
-  getSource(id: string): SourceRow | undefined {
-    return this.listSources().find((s) => s.id === id);
-  }
-
-  searchDatasets(query: DatasetQuery): { total: number; items: DatasetRow[] } {
-    const where: string[] = [];
-    const params: Record<string, unknown> = { limit: query.limit, offset: query.offset };
-    const match = query.q ? ftsQuery(query.q) : null;
-    let from = "datasets d";
-    let order = "d.title COLLATE NOCASE";
-    if (match) {
-      from = "datasets_fts f JOIN datasets d ON d.id = f.dataset_id";
-      where.push("datasets_fts MATCH @match");
-      params.match = match;
-      order = "bm25(datasets_fts)";
+    } finally {
+      conn.closeSync();
     }
+  }
+
+  async recordSyncError(sourceId: string, error: string): Promise<void> {
+    await this.conn.run(`UPDATE sources SET last_sync_error = $e WHERE id = $s`, { e: error, s: sourceId });
+  }
+
+  private sourcesSql(where = "") {
+    return `SELECT s.*,
+        (SELECT COUNT(*) FROM datasets d WHERE d.source_id = s.id)::INTEGER AS dataset_count,
+        (SELECT COUNT(*) FROM resources r WHERE r.source_id = s.id)::INTEGER AS resource_count
+      FROM sources s ${where} ORDER BY s.id`;
+  }
+
+  listSources(): Promise<SourceRow[]> {
+    return this.all<SourceRow>(this.sourcesSql());
+  }
+
+  async getSource(id: string): Promise<SourceRow | undefined> {
+    return (await this.all<SourceRow>(this.sourcesSql("WHERE s.id = $id"), { id }))[0];
+  }
+
+  /**
+   * Every search word must appear somewhere in the title, description,
+   * tags or publisher (case-insensitive). Title hits rank first.
+   */
+  async searchDatasets(query: DatasetQuery): Promise<{ total: number; items: DatasetRow[] }> {
+    const where: string[] = [];
+    const params: Record<string, DuckDBValue> = {};
+    const terms = query.q?.match(/[\p{L}\p{N}]+/gu) ?? [];
+    const titleHits: string[] = [];
+    terms.forEach((t, i) => {
+      params[`t${i}`] = `%${t}%`;
+      where.push(
+        `concat_ws(' ', d.title, d.description, array_to_string(d.tags, ' '), d.publisher) ILIKE $t${i}`,
+      );
+      titleHits.push(`(d.title ILIKE $t${i})::INTEGER`);
+    });
     if (query.source) {
-      where.push("d.source_id = @source");
+      where.push("d.source_id = $source");
       params.source = query.source;
     }
     if (query.hasApi !== undefined) {
-      where.push("d.has_api = @hasApi");
-      params.hasApi = query.hasApi ? 1 : 0;
+      where.push("d.has_api = $hasApi");
+      params.hasApi = query.hasApi;
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const { total } = this.db
-      .prepare(`SELECT COUNT(*) AS total FROM ${from} ${whereSql}`)
-      .get(params) as { total: number };
-    const rows = this.db
-      .prepare(`SELECT ${DATASET_COLUMNS} FROM ${from} ${whereSql} ORDER BY ${order} LIMIT @limit OFFSET @offset`)
-      .all(params) as RawDataset[];
-    return { total, items: rows.map(toDataset) };
+    const order = titleHits.length ? `${titleHits.join(" + ")} DESC, lower(d.title)` : "lower(d.title)";
+    const [{ total } = { total: 0 }] = await this.all<{ total: number }>(
+      `SELECT COUNT(*)::INTEGER AS total FROM datasets d ${whereSql}`,
+      params,
+    );
+    const items = await this.all<DatasetRow>(
+      `SELECT ${DATASET_COLUMNS} FROM datasets d ${whereSql} ORDER BY ${order}, d.id
+       LIMIT ${Math.trunc(query.limit)} OFFSET ${Math.trunc(query.offset)}`,
+      params,
+    );
+    return { total, items };
   }
 
-  getDataset(id: string): (DatasetRow & { resources: ResourceRow[] }) | undefined {
-    const row = this.db.prepare(`SELECT ${DATASET_COLUMNS} FROM datasets d WHERE d.id = ?`).get(id) as
-      | RawDataset
-      | undefined;
+  async getDataset(id: string): Promise<(DatasetRow & { resources: ResourceRow[] }) | undefined> {
+    const [row] = await this.all<DatasetRow>(`SELECT ${DATASET_COLUMNS} FROM datasets d WHERE d.id = $id`, { id });
     if (!row) return undefined;
-    const resources = (
-      this.db.prepare(`SELECT * FROM resources WHERE dataset_id = ? ORDER BY access_type, name`).all(id) as RawResource[]
-    ).map(toResource);
-    return { ...toDataset(row), resources };
+    const resources = await this.all<ResourceRow>(
+      `SELECT * FROM resources WHERE dataset_id = $id ORDER BY access_type, name, id`,
+      { id },
+    );
+    return { ...row, resources };
   }
 
-  listResources(query: ResourceQuery): { total: number; items: ResourceRow[] } {
+  async listResources(query: ResourceQuery): Promise<{ total: number; items: ResourceRow[] }> {
     const where: string[] = [];
-    const params: Record<string, unknown> = { limit: query.limit, offset: query.offset };
+    const params: Record<string, DuckDBValue> = {};
     if (query.source) {
-      where.push("source_id = @source");
+      where.push("source_id = $source");
       params.source = query.source;
     }
     if (query.dataset) {
-      where.push("dataset_id = @dataset");
+      where.push("dataset_id = $dataset");
       params.dataset = query.dataset;
     }
     if (query.access) {
-      where.push("access_type = @access");
+      where.push("access_type = $access");
       params.access = query.access;
     }
     if (query.format) {
-      where.push("UPPER(format) = UPPER(@format)");
+      where.push("upper(format) = upper($format)");
       params.format = query.format;
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const { total } = this.db.prepare(`SELECT COUNT(*) AS total FROM resources ${whereSql}`).get(params) as {
-      total: number;
-    };
-    const rows = this.db
-      .prepare(`SELECT * FROM resources ${whereSql} ORDER BY id LIMIT @limit OFFSET @offset`)
-      .all(params) as RawResource[];
-    return { total, items: rows.map(toResource) };
+    const [{ total } = { total: 0 }] = await this.all<{ total: number }>(
+      `SELECT COUNT(*)::INTEGER AS total FROM resources ${whereSql}`,
+      params,
+    );
+    const items = await this.all<ResourceRow>(
+      `SELECT * FROM resources ${whereSql} ORDER BY id LIMIT ${Math.trunc(query.limit)} OFFSET ${Math.trunc(query.offset)}`,
+      params,
+    );
+    return { total, items };
   }
 
-  getResource(id: string): ResourceRow | undefined {
-    const row = this.db.prepare(`SELECT * FROM resources WHERE id = ?`).get(id) as RawResource | undefined;
-    return row && toResource(row);
+  async getResource(id: string): Promise<ResourceRow | undefined> {
+    return (await this.all<ResourceRow>(`SELECT * FROM resources WHERE id = $id`, { id }))[0];
   }
 
   close(): void {
-    this.db.close();
+    this.conn.closeSync();
+    this.instance.closeSync();
   }
 }

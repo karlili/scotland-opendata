@@ -5,5 +5,5 @@ import { Hub } from "../hub.ts";
 import { createMcpServer } from "./server.ts";
 
 // For local MCP clients (e.g. Claude Desktop) that launch the server as a subprocess.
-const hub = new Hub(openCatalogue(config.dbPath));
+const hub = await Hub.create(await openCatalogue(config.dbPath));
 await createMcpServer(hub).connect(new StdioServerTransport());

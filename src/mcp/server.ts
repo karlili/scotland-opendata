@@ -17,7 +17,7 @@ export function createMcpServer(hub: Hub): McpServer {
       description: "List the Scottish open data portals the hub harvests, with dataset counts and last sync time.",
       annotations: readOnly,
     },
-    async () => text(hub.catalogue.listSources()),
+    async () => text(await hub.catalogue.listSources()),
   );
 
   server.registerTool(
@@ -37,7 +37,7 @@ export function createMcpServer(hub: Hub): McpServer {
     },
     async ({ query, source, include_csv_only, limit, offset }) =>
       text(
-        hub.catalogue.searchDatasets({
+        await hub.catalogue.searchDatasets({
           q: query,
           source,
           hasApi: include_csv_only ? undefined : true,
@@ -56,7 +56,7 @@ export function createMcpServer(hub: Hub): McpServer {
       annotations: readOnly,
     },
     async ({ dataset_id }) => {
-      const dataset = hub.catalogue.getDataset(dataset_id);
+      const dataset = await hub.catalogue.getDataset(dataset_id);
       return dataset ? text(dataset) : failure(new Error(`Unknown dataset: ${dataset_id}`));
     },
   );

@@ -4,7 +4,7 @@ import { config } from "./config.ts";
 import { openCatalogue } from "./db/catalogue.ts";
 import { Hub } from "./hub.ts";
 
-const hub = new Hub(openCatalogue(config.dbPath));
+const hub = await Hub.create(await openCatalogue(config.dbPath));
 const app = createApp(hub, { adminToken: process.env.ADMIN_TOKEN });
 
 serve({ fetch: app.fetch, port: config.port }, ({ port }) => {

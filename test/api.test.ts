@@ -21,7 +21,7 @@ describe("sync", () => {
     upstream.failCkan = true;
     const [report] = await hub.sync("ckan-test");
     expect(report).toMatchObject({ ok: false, error: expect.stringContaining("503") });
-    const source = hub.catalogue.getSource("ckan-test");
+    const source = await hub.catalogue.getSource("ckan-test");
     expect(source?.dataset_count).toBe(4);
     expect(source?.last_sync_error).toContain("503");
   });

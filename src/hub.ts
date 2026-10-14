@@ -33,19 +33,28 @@ export interface SyncReport {
 }
 
 /**
- * The hub's core: harvesting upstream catalogues into SQLite and proxying
+ * The hub's core: harvesting upstream catalogues into DuckDB and proxying
  * live queries. The REST API and the MCP server are thin layers over this.
  */
 export class Hub {
   readonly sources: SourceDefinition[];
 
-  constructor(
+  private constructor(
     readonly catalogue: Catalogue,
-    private readonly fetchImpl: Fetch = fetch,
-    sources: SourceDefinition[] = defaultSources,
+    private readonly fetchImpl: Fetch,
+    sources: SourceDefinition[],
   ) {
     this.sources = sources;
-    for (const s of sources) catalogue.upsertSource(s);
+  }
+
+  /** Builds a hub and registers its sources in the catalogue. */
+  static async create(
+    catalogue: Catalogue,
+    fetchImpl: Fetch = fetch,
+    sources: SourceDefinition[] = defaultSources,
+  ): Promise<Hub> {
+    for (const s of sources) await catalogue.upsertSource(s);
+    return new Hub(catalogue, fetchImpl, sources);
   }
 
   private definition(sourceId: string): SourceDefinition {
@@ -69,7 +78,7 @@ export class Hub {
     for (const def of targets) {
       try {
         const datasets = def.kind === "ckan" ? await this.ckan(def).harvest() : await this.sparql(def).harvest();
-        this.catalogue.replaceSourceContents(def.id, datasets, new Date().toISOString());
+        await this.catalogue.replaceSourceContents(def.id, datasets, new Date().toISOString());
         reports.push({
           source_id: def.id,
           ok: true,
@@ -78,7 +87,7 @@ export class Hub {
         });
       } catch (err) {
         const message = (err as Error).message;
-        this.catalogue.recordSyncError(def.id, message);
+        await this.catalogue.recordSyncError(def.id, message);
         reports.push({ source_id: def.id, ok: false, error: message });
       }
     }
@@ -87,7 +96,7 @@ export class Hub {
 
   /** Proxies a row-level query to whichever upstream API backs the resource. */
   async queryResource(resourceId: string, query: RowQuery): Promise<RowResult> {
-    const resource = this.catalogue.getResource(resourceId);
+    const resource = await this.catalogue.getResource(resourceId);
     if (!resource) throw new NotFoundError(`Unknown resource: ${resourceId}`);
     if (!resource.queryable) {
       throw new BadRequestError(
