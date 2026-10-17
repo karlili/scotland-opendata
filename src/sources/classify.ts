@@ -2,7 +2,11 @@ import type { AccessType } from "../db/catalogue.ts";
 
 const API_FORMATS = new Set([
   "API", "JSON", "GEOJSON", "XML", "RDF", "JSON-LD", "SPARQL", "ODATA",
-  "WMS", "WFS", "WMTS", "ESRI REST", "ARCGIS", "ARCGIS REST", "OGC API",
+  "WMS", "WFS", "WMTS", "ESRI REST", "ARCGIS", "ARCGIS REST", "ARCGIS GEOSERVICE", "OGC API", "REST",
+]);
+/** Download formats; a declared one wins over an /api/ URL (ArcGIS Hub serves downloads under /api/download/). */
+const FILE_FORMATS = new Set([
+  "ZIP", "KML", "KMZ", "SHP", "SHAPEFILE", "XLS", "XLSX", "ODS", "PDF", "DOC", "DOCX", "GPKG", "GEOPACKAGE", "FILE GEODATABASE",
 ]);
 const API_URL = /\/api\/|\/rest\/services\/|[?&]service=(wms|wfs)\b|\/(wms|wfs|ows)\b|\/sparql\b/i;
 
@@ -21,6 +25,7 @@ export function classifyResource(input: {
   const url = input.url ?? "";
   if (API_FORMATS.has(format)) return { accessType: "api", queryable: false };
   if (format === "CSV" || /\.csv(\?|$)/i.test(url)) return { accessType: "csv", queryable: false };
+  if (FILE_FORMATS.has(format)) return { accessType: "file", queryable: false };
   if (API_URL.test(url)) return { accessType: "api", queryable: false };
   return { accessType: "file", queryable: false };
 }

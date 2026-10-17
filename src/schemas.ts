@@ -11,15 +11,43 @@ export const SourceSchema = z
     id: z.string(),
     title: z.string(),
     publisher: z.string(),
-    kind: z.enum(["ckan", "sparql"]),
-    base_url: z.string(),
+    kind: z.enum(["ckan", "sparql", "dcat", "arcgis"]),
+    base_url: z.string().describe("CKAN site root, SPARQL endpoint, DCAT-AP feed or ArcGIS search URL"),
     homepage: z.string(),
+    council_id: z.string().nullable().describe("Set when the source is a council's own portal"),
     last_synced_at: z.string().nullable(),
     last_sync_error: z.string().nullable(),
     dataset_count: z.number().int(),
     resource_count: z.number().int(),
   })
   .meta({ ref: "Source" });
+
+export const ProvisionSchema = z
+  .enum(["portal", "landing-page", "none"])
+  .describe(
+    "portal: a data portal with a catalogue; landing-page: downloads or feeds on the council site; none: nothing on the council's own site (all councils still publish on Spatial Hub)",
+  );
+
+export const CouncilSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    gss: z.string().describe("GSS council area code, e.g. S12000036"),
+    website: z.string(),
+    provision: ProvisionSchema,
+    open_data_url: z.string().nullable(),
+    platform: z.string().nullable().describe("e.g. ArcGIS Hub, CKAN, USMART"),
+    endpoints: z
+      .array(z.object({ title: z.string(), url: z.string(), format: z.string() }))
+      .describe("Feeds and services the hub tracks but does not harvest"),
+    notes: z.string(),
+    checked_at: z.string().describe("When the register entry was last checked"),
+    source_ids: z.array(z.string()).describe("Hub sources harvested from the council's own portal"),
+    dataset_count: z.number().int(),
+  })
+  .meta({ ref: "Council" });
+
+export const CouncilListQuery = z.object({ provision: ProvisionSchema.optional() });
 
 export const ResourceSchema = z
   .object({

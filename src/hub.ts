@@ -1,5 +1,8 @@
-import type { Catalogue } from "./db/catalogue.ts";
+import { councils as defaultCouncils, COUNCILS_CHECKED_AT, type CouncilDefinition } from "./councils.ts";
+import type { Catalogue, DatasetInput } from "./db/catalogue.ts";
+import { ArcgisSearchClient } from "./sources/arcgis.ts";
 import { CkanClient } from "./sources/ckan.ts";
+import { DcatClient } from "./sources/dcat.ts";
 import type { Fetch } from "./sources/http.ts";
 import { sources as defaultSources, type SourceDefinition } from "./sources/registry.ts";
 import { SparqlClient } from "./sources/sparql.ts";
@@ -47,13 +50,15 @@ export class Hub {
     this.sources = sources;
   }
 
-  /** Builds a hub and registers its sources in the catalogue. */
+  /** Builds a hub and registers its sources and the council register in the catalogue. */
   static async create(
     catalogue: Catalogue,
     fetchImpl: Fetch = fetch,
     sources: SourceDefinition[] = defaultSources,
+    councils: CouncilDefinition[] = defaultCouncils,
   ): Promise<Hub> {
     for (const s of sources) await catalogue.upsertSource(s);
+    await catalogue.replaceCouncils(councils, COUNCILS_CHECKED_AT);
     return new Hub(catalogue, fetchImpl, sources);
   }
 
@@ -71,13 +76,26 @@ export class Hub {
     return new SparqlClient(def.baseUrl, this.fetchImpl);
   }
 
+  private harvest(def: SourceDefinition): Promise<DatasetInput[]> {
+    switch (def.kind) {
+      case "ckan":
+        return this.ckan(def).harvest();
+      case "sparql":
+        return this.sparql(def).harvest();
+      case "dcat":
+        return new DcatClient(def.baseUrl, this.fetchImpl).harvest();
+      case "arcgis":
+        return new ArcgisSearchClient(def.baseUrl, this.fetchImpl).harvest();
+    }
+  }
+
   /** Re-harvests one source (or all). A failed source keeps its previous catalogue. */
   async sync(sourceId?: string): Promise<SyncReport[]> {
     const targets = sourceId ? [this.definition(sourceId)] : this.sources;
     const reports: SyncReport[] = [];
     for (const def of targets) {
       try {
-        const datasets = def.kind === "ckan" ? await this.ckan(def).harvest() : await this.sparql(def).harvest();
+        const datasets = await this.harvest(def);
         await this.catalogue.replaceSourceContents(def.id, datasets, new Date().toISOString());
         reports.push({
           source_id: def.id,
@@ -108,6 +126,7 @@ export class Hub {
       const result = await this.ckan(def).datastoreSearch(resource.upstream_id, query);
       return { resource_id: resourceId, ...result, limit: query.limit, offset: query.offset };
     }
+    if (def.kind !== "sparql") throw new BadRequestError(`Resource ${resourceId} is not queryable through the hub`);
     if (query.q || query.filters || query.sort) {
       throw new BadRequestError("q, filters and sort are not supported on SPARQL resources; use the sparql endpoint");
     }

@@ -10,10 +10,36 @@ lookups are fast, and proxies row-level queries live to the upstream APIs.
 | --- | --- | --- | --- |
 | `data-gov-scot` | [data.gov.scot](https://data.gov.scot/data) | CKAN Action API at `https://api.data.gov.scot/api/3/action/` | Harvests `package_search`; proxies `datastore_search` for datastore-backed resources |
 | `statistics-gov-scot` | [statistics.gov.scot](https://statistics.gov.scot) | SPARQL 1.1 at `https://statistics.gov.scot/sparql` | Harvests every `qb:DataSet`; serves observations as rows; passes read-only SPARQL through |
+| `spatial-hub` | [Spatial Hub Scotland](https://data.spatialhub.scot) | CKAN Action API | Harvests `package_search`. All 32 councils publish standardised spatial data here, many as WFS or ArcGIS REST services |
+| 14 council portals | See [Councils](#councils) | ArcGIS Hub DCAT-AP feed (`kind: dcat`), ArcGIS open data group search (`kind: arcgis`), or CKAN | Harvests the catalogue; services are tracked as `api`, downloads as `csv` or `file` |
 
-Base URLs can be overridden with `DATA_GOV_SCOT_CKAN_URL` and
-`STATISTICS_GOV_SCOT_SPARQL_URL`. New CKAN or SPARQL portals (councils,
-agencies) are one entry in `src/sources/registry.ts`.
+Base URLs of the national portals can be overridden with `DATA_GOV_SCOT_CKAN_URL`,
+`STATISTICS_GOV_SCOT_SPARQL_URL` and `SPATIAL_HUB_CKAN_URL`. A new portal is one
+entry in `src/sources/registry.ts`.
+
+## Councils
+
+`src/councils.ts` registers all 32 councils, whether or not they publish open
+data on their own website, and is loaded into the `councils` table at startup.
+`GET /v1/councils` and the `list_councils` MCP tool serve it. Each entry has the
+GSS code, how the council publishes (`portal`, `landing-page` or `none`), the
+portal URL and platform, feeds the hub tracks but does not harvest, and the hub
+sources that harvest it. Every council also publishes on Spatial Hub.
+
+Checked 2026-10-14:
+
+| Provision | Councils |
+| --- | --- |
+| Portal, harvested (14) | Aberdeen City, Angus (CKAN), Argyll and Bute, Dundee City, Edinburgh, Glasgow City, Highland, Moray, North Ayrshire, North Lanarkshire, Perth and Kinross, Renfrewshire, South Ayrshire, Stirling. All but Angus run ArcGIS Hub |
+| Portal, not harvested yet (1) | Dumfries and Galloway (USMART) |
+| Landing page (4) | Aberdeenshire, East Ayrshire, Falkirk, Shetland Islands |
+| Nothing on the council site (13) | Clackmannanshire, East Dunbartonshire, East Lothian, East Renfrewshire, Fife, Inverclyde, Midlothian, Orkney Islands, Scottish Borders, South Lanarkshire, West Dunbartonshire, West Lothian, Comhairle nan Eilean Siar |
+
+Portal URLs and ArcGIS group ids were cross-checked against
+[Open Data Scotland](https://github.com/OpenDataScotland/the_od_bods), which
+harvests the same portals weekly. Its latest run had no output for Angus and
+North Lanarkshire, so those two may fail to sync. Edinburgh, Glasgow, Dundee
+and Perth and Kinross have retired their older CKAN portals.
 
 ### How resources are classified
 
@@ -68,6 +94,8 @@ If you run the stdio MCP server alongside the HTTP server, point it at its own
 | Method | Path | |
 | --- | --- | --- |
 | GET | `/v1/sources` | Upstream portals, counts, last sync |
+| GET | `/v1/councils?provision=portal\|landing-page\|none` | All 32 councils and how each publishes open data |
+| GET | `/v1/councils/{id}` | One council, with its hub sources and dataset count |
 | GET | `/v1/datasets?q=&source=&has_api=true\|false\|any` | Search: every word must match title, description, tags or publisher |
 | GET | `/v1/datasets/{id}` | Dataset with its resources |
 | GET | `/v1/resources?access=api\|csv\|file&format=&dataset=` | Every tracked endpoint and download |
@@ -79,7 +107,7 @@ IDs are `<source>:<upstream id>`, e.g. `data-gov-scot:population-estimates`.
 
 ## MCP tools
 
-`list_sources`, `search_datasets`, `get_dataset`, `query_resource`, `run_sparql`.
+`list_sources`, `list_councils`, `search_datasets`, `get_dataset`, `query_resource`, `run_sparql`.
 
 ## Development
 
@@ -88,4 +116,5 @@ pnpm typecheck
 pnpm test
 ```
 
-Tests run against hand-written CKAN and SPARQL responses, so they need no network.
+Tests run against hand-written CKAN, SPARQL, DCAT-AP and ArcGIS search
+responses, so they need no network.
