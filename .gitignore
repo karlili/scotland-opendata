@@ -1,0 +1,7 @@
+node_modules/
+data/
+*.duckdb
+*.duckdb.wal
+*.db
+*.db-*
+.env
